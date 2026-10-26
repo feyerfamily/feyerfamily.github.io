@@ -134,7 +134,12 @@
   .btn { border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; border: 1px solid var(--rule); background: none; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
 
-  .foot { font-size: 13px; color: var(--muted); line-height: 1.6; max-width: 75ch; }
+  .foot { font-size: 13px; color: var(--muted); line-height: 1.6; max-width: 75ch; margin: 0; }
+  .remind { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding-top: 16px; border-top: 1px solid var(--rule-soft); }
+  .remind-btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--on-accent); background: var(--accent);
+                border-radius: 999px; padding: 9px 16px; font-size: 14px; font-weight: 500; }
+  .remind-btn svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .remind .foot code { font-size: 12px; user-select: all; overflow-wrap: anywhere; color: var(--ink); }
 
   @media (max-width: 520px) { h1 { font-size: 40px; } .progress { min-width: 140px; } }
   @media (prefers-reduced-motion: reduce) { .bar i, .box { transition: none; } }
@@ -161,6 +166,14 @@
   <div class="board" id="board"></div>
 
   <p class="foot">Tap a task to check it off. Check marks clear every Monday so the routine is ready for a new week. Tasks marked <span class="tag" style="margin:0">this week</span> show up for one week only. The chart saves on this device only, so use the same phone, tablet or computer each time.</p>
+
+  <section class="remind" aria-label="Reminders">
+    <a class="remind-btn" href="webcal://feyerfamily.github.io/reminders.ics">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.7 11h10.6L12 8.5V5.8a4 4 0 0 0-4-4zM6.5 13.2a1.6 1.6 0 0 0 3 0"/></svg>
+      Get reminders
+    </a>
+    <p class="foot">Weekday alerts at 7:00 AM, 3:30 PM and 8:00 PM, added to your phone's calendar. Using Google Calendar? Add this address under “From URL”: <code>https://feyerfamily.github.io/reminders.ics</code></p>
+  </section>
 </div>
 
 <script>
@@ -187,10 +200,14 @@ function weekStart(d) {
   x.setDate(x.getDate() + (dow === 0 ? 1 : dow === 6 ? 2 : 1 - dow));
   return x;
 }
-const now = new Date();
-const monday = weekStart(now);
-const WK = monday.getFullYear() + "-" + String(monday.getMonth() + 1).padStart(2, "0") + "-" + String(monday.getDate()).padStart(2, "0");
-const TODAY = (now.getDay() >= 1 && now.getDay() <= 5) ? DAYS[now.getDay() - 1].k : null;
+let monday, WK, TODAY;
+function computeWeek() {
+  const now = new Date();
+  monday = weekStart(now);
+  WK = monday.getFullYear() + "-" + String(monday.getMonth() + 1).padStart(2, "0") + "-" + String(monday.getDate()).padStart(2, "0");
+  TODAY = (now.getDay() >= 1 && now.getDay() <= 5) ? DAYS[now.getDay() - 1].k : null;
+}
+computeWeek();
 
 const state = {
   tasks: [], storageOk: true,
@@ -201,12 +218,13 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-(function setWeekLabel() {
+function setWeekLabel() {
   const fri = new Date(monday); fri.setDate(monday.getDate() + 4);
   const m = (d) => d.toLocaleDateString(undefined, { month: "short" });
   $("week-label").textContent = "Week of " + m(monday) + " " + monday.getDate() + " – " +
     (m(fri) !== m(monday) ? m(fri) + " " : "") + fri.getDate();
-})();
+}
+setWeekLabel();
 
 function visible() {
   return state.tasks.filter((t) => !t.week || t.week === WK).sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -392,6 +410,21 @@ mq.addEventListener("change", (e) => { state.narrow = e.matches; render(); });
 window.addEventListener("storage", (e) => {
   if (e.key === STORE_KEY) { load(); render(); }
 });
+
+// A phone can keep the page open for days; catch a new day or week when she comes back to it.
+function checkDate() {
+  const wk = WK, today = TODAY;
+  computeWeek();
+  if (WK === wk && TODAY === today) return;
+  if (WK !== wk) { load(); setWeekLabel(); }
+  state.day = TODAY || "mon";
+  state.adding = null;
+  render();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkDate(); });
+window.addEventListener("focus", checkDate);
+window.addEventListener("pageshow", checkDate);
+setInterval(checkDate, 60000);
 
 load();
 render();
