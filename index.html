@@ -74,6 +74,10 @@
   .progress b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
   .bar { height: 4px; border-radius: 2px; background: var(--rule-soft); overflow: hidden; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .sync { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .sync::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--rule); }
+  .sync.ok::before { background: var(--accent); }
+  .sync.error::before { background: var(--danger); }
   .edit-btn { background: none; border: 1px solid var(--rule); border-radius: 999px; padding: 7px 16px; font-size: 13px; cursor: pointer; }
   .edit-btn[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 
@@ -170,6 +174,7 @@
         <span id="progress-text"></span>
         <div class="bar"><i id="progress-bar"></i></div>
       </div>
+      <span class="sync" id="sync" hidden></span>
       <button class="edit-btn" id="edit-btn" type="button" aria-pressed="false" hidden>Edit list</button>
     </div>
   </header>
@@ -179,7 +184,7 @@
   <div class="dayname" id="dayname" hidden></div>
   <div class="board" id="board"></div>
 
-  <p class="foot">Tap a task to check it off. Check marks start fresh each Monday, and your tasks stay on the chart. Use the arrows by the dates to go back up to 8 weeks and check off anything that got done but wasn't marked. Tasks tagged <span class="tag" style="margin:0">one week</span> show up only in the week they were added for. The chart saves on this device only, so always open it from the same home-screen icon.</p>
+  <p class="foot">Tap a task to check it off. Check marks start fresh each Monday, and your tasks stay on the chart. Use the arrows by the dates to go back up to 8 weeks and check off anything that got done but wasn't marked. Tasks tagged <span class="tag" style="margin:0">one week</span> show up only in the week they were added for. <span id="save-note">The chart saves on this device only, so always open it from the same home-screen icon.</span></p>
 
   <section class="remind" aria-label="Reminders">
     <a class="remind-btn" href="webcal://feyerfamily.github.io/reminders.ics">
@@ -322,13 +327,23 @@ function render() {
   $("progress-text").innerHTML = "<b>" + done + " of " + total + "</b> done" + (state.offset === 0 ? " this week" : "");
   $("progress-bar").style.width = total ? (done / total * 100) + "%" : "0";
   $("edit-btn").hidden = !total;
+
+  // Sync status (family-link mode only)
+  const SYNC_TEXT = { connecting: "Connecting…", ok: "Synced with family", pending: "Saving…", offline: "Offline · will sync", error: "Not syncing" };
+  $("sync").hidden = !FAMILY;
+  if (FAMILY) { $("sync").textContent = SYNC_TEXT[state.sync] || ""; $("sync").className = "sync " + state.sync; }
+  $("save-note").textContent = FAMILY
+    ? "Changes sync to every device that opened the family link."
+    : "The chart saves on this device only, so always open it from the same home-screen icon.";
   $("edit-btn").setAttribute("aria-pressed", String(state.editing));
   $("edit-btn").textContent = state.editing ? "Done editing" : "Edit list";
 
   // Status / empty-state note
   const note = $("note");
   let msg = "";
-  if (!state.storageOk) msg = "This browser isn't letting the chart save, so changes will be lost when the page closes. A private or incognito window usually causes this. Open the link in a normal browser window instead.";
+  if (FAMILY && state.sync === "error" && !state.tasks.length) msg = "Can't reach the family list right now. Check the internet connection, then close and reopen the chart.";
+  else if (FAMILY && state.sync === "connecting" && !state.tasks.length) msg = "Loading the family list…";
+  else if (!FAMILY && !state.storageOk) msg = "This browser isn't letting the chart save, so changes will be lost when the page closes. A private or incognito window usually causes this. Open the link in a normal browser window instead.";
   else if (state.offset < 0 && list.length) msg = "You're looking back at the week of " + shortDate(viewMonday) + ". Tap anything that got done but wasn't checked off. This week's chart isn't affected.";
   else if (state.offset > 0 && list.length) msg = "You're looking ahead to the week of " + shortDate(viewMonday) + ". Add something with “Only the week of " + shortDate(viewMonday) + "” ticked to plan for just that week.";
   else if (!list.length) msg = "Nothing on the chart yet. Tap + Add in any box to put a task there. Tick “Add to all 5 days” for things that happen every school day, like brushing teeth.";
@@ -370,15 +385,81 @@ function render() {
   }
 }
 
-// Everything lives in this browser's storage, so no sign-in is needed.
+// Without a family code everything lives in this browser's storage. With one (from the
+// family link), the list lives in the family's Firebase database and syncs between devices.
 const STORE_KEY = "weekly-routine-v1";
-function load() {
+const FAMILY_KEY = "weekly-routine-family";
+const MIGRATED_KEY = "weekly-routine-migrated";
+const FIREBASE = {
+  apiKey: "AIzaSyDatS5SX_OBAvoUGVPQgEG1mvrCrLti0lU",
+  authDomain: "feyerfamily-f6a0a.firebaseapp.com",
+  projectId: "feyerfamily-f6a0a",
+  storageBucket: "feyerfamily-f6a0a.firebasestorage.app",
+  messagingSenderId: "382101998141",
+  appId: "1:382101998141:web:f633f1cf2a5daae0f17854"
+};
+const FIREBASE_SDK = "https://www.gstatic.com/firebasejs/11.10.0/";
+
+function familyCode() {
+  const ok = (c) => typeof c === "string" && /^[A-Za-z0-9_-]{20,64}$/.test(c);
+  let code = null;
+  try { code = new URLSearchParams(location.search).get("f"); } catch (e) {}
+  if (ok(code)) { try { localStorage.setItem(FAMILY_KEY, code); } catch (e) {} return code; }
+  try { code = localStorage.getItem(FAMILY_KEY); } catch (e) { code = null; }
+  return ok(code) ? code : null;
+}
+const FAMILY = familyCode();
+state.sync = FAMILY ? "connecting" : "local";
+let cloud = null;
+
+async function connectCloud() {
+  try {
+    const [appMod, authMod, fs] = await Promise.all([
+      import(FIREBASE_SDK + "firebase-app.js"),
+      import(FIREBASE_SDK + "firebase-auth.js"),
+      import(FIREBASE_SDK + "firebase-firestore.js")
+    ]);
+    const app = appMod.initializeApp(FIREBASE);
+    let db;
+    try { db = fs.initializeFirestore(app, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) }); }
+    catch (e) { db = fs.getFirestore(app); }
+    const auth = authMod.getAuth(app);
+    const user = await new Promise((res) => { const stop = authMod.onAuthStateChanged(auth, (u) => { stop(); res(u); }); });
+    if (!user) await authMod.signInAnonymously(auth);
+    const col = fs.collection(db, "families", FAMILY, "tasks");
+    cloud = { fs, col };
+    fs.onSnapshot(col, { includeMetadataChanges: true }, (snap) => {
+      state.tasks = snap.docs.map((d) => Object.assign({}, d.data(), { id: d.id }));
+      state.sync = snap.metadata.hasPendingWrites ? "pending" : snap.metadata.fromCache ? "offline" : "ok";
+      if (!snap.metadata.fromCache) migrateLocal(snap);
+      render();
+    }, () => { state.sync = "error"; render(); });
+  } catch (e) {
+    cloud = null; state.sync = "error"; render();
+  }
+}
+
+// The first time a device joins with the family link, copy over anything it had saved on its own.
+function migrateLocal(snap) {
+  try { if (localStorage.getItem(MIGRATED_KEY) === FAMILY) return; } catch (e) { return; }
+  const have = new Set(snap.docs.map((d) => d.id));
+  const mine = readLocal().filter((t) => t.id && !have.has(t.id));
+  mine.forEach((t) => cloudWrite(cloud.fs.setDoc(cloud.fs.doc(cloud.col, t.id), taskData(t))));
+  try { localStorage.setItem(MIGRATED_KEY, FAMILY); } catch (e) {}
+}
+const taskData = (t) => ({ text: t.text, day: t.day, slot: t.slot, order: t.order || 0, week: t.week || null, done: t.done || {} });
+function cloudWrite(p) { p.catch(() => { state.sync = "error"; render(); }); }
+
+function readLocal() {
   let tasks = [];
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) tasks = JSON.parse(raw);
   } catch (e) { state.storageOk = false; }
-  if (!Array.isArray(tasks)) tasks = [];
+  return Array.isArray(tasks) ? tasks : [];
+}
+function load() {
+  let tasks = readLocal();
   // Keep each week's check marks, but drop anything older than the arrows can reach.
   const cutoff = new Date(monday); cutoff.setDate(monday.getDate() - 7 * WEEKS_BACK);
   const CUT = keyOf(cutoff);
@@ -403,14 +484,27 @@ function addTask(form) {
   const days = state.optAll ? DAYS.map((d) => d.k) : [day];
   const once = form.querySelector("#opt-once").checked;
   const base = Date.now();
-  days.forEach((d, i) => state.tasks.push({ id: newId(), text, day: d, slot, order: base + i, week: once ? VW : null, done: {} }));
+  const added = days.map((d, i) => ({ id: newId(), text, day: d, slot, order: base + i, week: once ? VW : null, done: {} }));
   state.adding = null; state.draft = ""; state.optAll = false; state.optOnce = false;
+  if (FAMILY) {
+    if (!cloud) { render(); return; }
+    added.forEach((t) => cloudWrite(cloud.fs.setDoc(cloud.fs.doc(cloud.col, t.id), taskData(t))));
+    render();
+    return;
+  }
+  state.tasks.push(...added);
   save(); render();
 }
 
 function toggle(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
+  if (FAMILY) {
+    if (!cloud) return;
+    const { fs, col } = cloud;
+    cloudWrite(fs.updateDoc(fs.doc(col, id), new fs.FieldPath("done", VW), isDone(t) ? fs.deleteField() : true));
+    return;
+  }
   const done = Object.assign({}, t.done);
   if (isDone(t)) delete done[VW]; else done[VW] = true;
   t.done = done;
@@ -423,6 +517,10 @@ document.addEventListener("click", (ev) => {
   const act = el.dataset.act;
   if (act === "toggle") toggle(el.dataset.id);
   else if (act === "del") {
+    if (FAMILY) {
+      if (cloud) cloudWrite(cloud.fs.deleteDoc(cloud.fs.doc(cloud.col, el.dataset.id)));
+      return;
+    }
     state.tasks = state.tasks.filter((t) => t.id !== el.dataset.id);
     save(); render();
   } else if (act === "add") {
@@ -460,7 +558,7 @@ mq.addEventListener("change", (e) => { state.narrow = e.matches; render(); });
 
 // Keep two open tabs on the same device in step.
 window.addEventListener("storage", (e) => {
-  if (e.key === STORE_KEY) { load(); render(); }
+  if (!FAMILY && e.key === STORE_KEY) { load(); render(); }
 });
 
 // A phone can keep the page open for days; catch a new day or week when she comes back to it.
@@ -468,7 +566,7 @@ function checkDate() {
   const wk = WK, today = TODAY;
   computeWeek();
   if (WK === wk && TODAY === today) return;
-  if (WK !== wk) { load(); setView(0); }
+  if (WK !== wk) { if (!FAMILY) load(); setView(0); }
   state.day = TODAY || "mon";
   state.adding = null;
   render();
@@ -478,7 +576,7 @@ window.addEventListener("focus", checkDate);
 window.addEventListener("pageshow", checkDate);
 setInterval(checkDate, 60000);
 
-load();
+if (FAMILY) connectCloud(); else load();
 render();
 </script>
 </body>
