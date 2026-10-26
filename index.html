@@ -60,6 +60,15 @@
   .title { display: flex; flex-direction: column; gap: 2px; }
   h1 { margin: 0; font-family: var(--f-script); font-weight: 600; font-size: 46px; line-height: 1; text-wrap: balance; }
   .week { font-family: var(--f-cap); font-weight: 600; text-transform: uppercase; letter-spacing: .14em; font-size: 15px; color: var(--muted); }
+  .weeknav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .wk-arrow { width: 34px; height: 34px; padding: 0 0 2px; display: grid; place-items: center; border: 1px solid var(--rule-soft); border-radius: 50%;
+              background: none; font-size: 20px; line-height: 1; cursor: pointer; }
+  .wk-arrow:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .wk-arrow:disabled { opacity: .35; cursor: default; }
+  .wk-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding-inline: 2px; }
+  .wk-rel { font-size: 12px; color: var(--muted); }
+  .wk-rel.other { color: var(--accent); font-weight: 500; }
+  .wk-back { background: none; border: 0; padding: 4px; color: var(--accent); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
   .tools { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .progress { display: flex; flex-direction: column; gap: 6px; min-width: 170px; font-size: 13px; color: var(--muted); }
   .progress b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -149,7 +158,12 @@
   <header class="top">
     <div class="title">
       <h1>Addisyn’s Weekly Schedule</h1>
-      <div class="week" id="week-label"></div>
+      <div class="weeknav">
+        <button class="wk-arrow" id="prev-week" type="button" data-act="prev" aria-label="Previous week">‹</button>
+        <div class="wk-text"><span class="week" id="week-label"></span><span class="wk-rel" id="week-rel"></span></div>
+        <button class="wk-arrow" id="next-week" type="button" data-act="next" aria-label="Next week">›</button>
+        <button class="wk-back" id="this-week" type="button" data-act="thisweek" hidden>Back to this week</button>
+      </div>
     </div>
     <div class="tools">
       <div class="progress" id="progress" hidden>
@@ -165,7 +179,7 @@
   <div class="dayname" id="dayname" hidden></div>
   <div class="board" id="board"></div>
 
-  <p class="foot">Tap a task to check it off. Check marks clear every Monday so the routine is ready for a new week. Tasks marked <span class="tag" style="margin:0">this week</span> show up for one week only. The chart saves on this device only, so use the same phone, tablet or computer each time.</p>
+  <p class="foot">Tap a task to check it off. Each week starts with a clean chart. Use the arrows next to the dates to go back and check off anything that got done but wasn't marked. Tasks tagged <span class="tag" style="margin:0">one week</span> show up only in the week they were added for. The chart saves on this device only, so use the same phone, tablet or computer each time.</p>
 
   <section class="remind" aria-label="Reminders">
     <a class="remind-btn" href="webcal://feyerfamily.github.io/reminders.ics">
@@ -200,17 +214,23 @@ function weekStart(d) {
   x.setDate(x.getDate() + (dow === 0 ? 1 : dow === 6 ? 2 : 1 - dow));
   return x;
 }
-let monday, WK, TODAY;
+// How far the arrows go: back far enough to fix a missed check mark, ahead far enough to plan.
+const WEEKS_BACK = 8, WEEKS_AHEAD = 4;
+const keyOf = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const shortDate = (d) => d.toLocaleDateString(undefined, { month: "short" }) + " " + d.getDate();
+
+// WK is the real current week; VW is the week on screen, which the arrows move.
+let monday, WK, TODAY, viewMonday, VW;
 function computeWeek() {
   const now = new Date();
   monday = weekStart(now);
-  WK = monday.getFullYear() + "-" + String(monday.getMonth() + 1).padStart(2, "0") + "-" + String(monday.getDate()).padStart(2, "0");
+  WK = keyOf(monday);
   TODAY = (now.getDay() >= 1 && now.getDay() <= 5) ? DAYS[now.getDay() - 1].k : null;
 }
 computeWeek();
 
 const state = {
-  tasks: [], storageOk: true,
+  tasks: [], storageOk: true, offset: 0,
   editing: false, adding: null, draft: "", optAll: false, optOnce: false,
   narrow: false, day: TODAY || "mon"
 };
@@ -218,18 +238,35 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function setWeekLabel() {
-  const fri = new Date(monday); fri.setDate(monday.getDate() + 4);
-  const m = (d) => d.toLocaleDateString(undefined, { month: "short" });
-  $("week-label").textContent = "Week of " + m(monday) + " " + monday.getDate() + " – " +
-    (m(fri) !== m(monday) ? m(fri) + " " : "") + fri.getDate();
+function setView(offset) {
+  state.offset = Math.max(-WEEKS_BACK, Math.min(WEEKS_AHEAD, offset));
+  viewMonday = new Date(monday);
+  viewMonday.setDate(monday.getDate() + 7 * state.offset);
+  VW = keyOf(viewMonday);
+  state.adding = null;
+  setWeekLabel();
 }
-setWeekLabel();
 
-function visible() {
-  return state.tasks.filter((t) => !t.week || t.week === WK).sort((a, b) => (a.order || 0) - (b.order || 0));
+function setWeekLabel() {
+  const fri = new Date(viewMonday); fri.setDate(viewMonday.getDate() + 4);
+  const m = (d) => d.toLocaleDateString(undefined, { month: "short" });
+  $("week-label").textContent = "Week of " + m(viewMonday) + " " + viewMonday.getDate() + " – " +
+    (m(fri) !== m(viewMonday) ? m(fri) + " " : "") + fri.getDate();
+  const o = state.offset;
+  $("week-rel").textContent = o === 0 ? "This week" : o === -1 ? "Last week" : o === 1 ? "Next week" :
+    o < 0 ? -o + " weeks ago" : "In " + o + " weeks";
+  $("week-rel").classList.toggle("other", o !== 0);
+  $("prev-week").disabled = o <= -WEEKS_BACK;
+  $("next-week").disabled = o >= WEEKS_AHEAD;
+  $("this-week").hidden = o === 0;
 }
-const isDone = (t) => !!(t.done && t.done[WK]);
+setView(0);
+
+const isToday = (day) => state.offset === 0 && day === TODAY;
+function visible() {
+  return state.tasks.filter((t) => !t.week || t.week === VW).sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+const isDone = (t) => !!(t.done && t.done[VW]);
 function dayCount(list, day) {
   const ts = list.filter((t) => t.day === day);
   return { total: ts.length, done: ts.filter(isDone).length };
@@ -242,13 +279,13 @@ function countText(c) {
 function cellHTML(list, day, slot, extra) {
   const key = day + "|" + slot;
   const ts = list.filter((t) => t.day === day && t.slot === slot);
-  let h = '<div class="cell' + (day === TODAY ? " today" : "") + extra + '"><ul class="items">';
+  let h = '<div class="cell' + (isToday(day) ? " today" : "") + extra + '"><ul class="items">';
   for (const t of ts) {
     const d = isDone(t);
     h += '<li class="item' + (d ? " done" : "") + '">' +
       '<button class="tick" type="button" data-act="toggle" data-id="' + esc(t.id) + '" aria-pressed="' + d + '">' +
       '<span class="box">' + ICON.check + '</span><span class="txt">' + esc(t.text) +
-      (t.week ? '<span class="tag">this week</span>' : "") + '</span></button>' +
+      (t.week ? '<span class="tag">one week</span>' : "") + '</span></button>' +
       (state.editing ? '<button class="del" type="button" data-act="del" data-id="' + esc(t.id) + '" aria-label="Remove ' + esc(t.text) + '">×</button>' : "") +
       '</li>';
   }
@@ -258,7 +295,8 @@ function cellHTML(list, day, slot, extra) {
       h += '<form class="addform" data-cell="' + key + '">' +
         '<input type="text" id="new-task" maxlength="80" placeholder="What needs doing?" autocomplete="off" aria-label="New task">' +
         '<label class="opt"><input type="checkbox" id="opt-all"' + (state.optAll ? " checked" : "") + '> Add to all 5 days</label>' +
-        '<label class="opt"><input type="checkbox" id="opt-once"' + (state.optOnce ? " checked" : "") + '> This week only</label>' +
+        '<label class="opt"><input type="checkbox" id="opt-once"' + (state.optOnce ? " checked" : "") + '> ' +
+        (state.offset === 0 ? "This week only" : "Only the week of " + shortDate(viewMonday)) + '</label>' +
         '<div class="row"><button class="btn primary" type="submit">Add</button><button class="btn" type="button" data-act="cancel">Cancel</button></div>' +
         "</form>";
     } else {
@@ -281,7 +319,7 @@ function render() {
   // Header progress
   const total = list.length, done = list.filter(isDone).length;
   $("progress").hidden = !total;
-  $("progress-text").innerHTML = "<b>" + done + " of " + total + "</b> done this week";
+  $("progress-text").innerHTML = "<b>" + done + " of " + total + "</b> done" + (state.offset === 0 ? " this week" : "");
   $("progress-bar").style.width = total ? (done / total * 100) + "%" : "0";
   $("edit-btn").hidden = !total;
   $("edit-btn").setAttribute("aria-pressed", String(state.editing));
@@ -291,6 +329,8 @@ function render() {
   const note = $("note");
   let msg = "";
   if (!state.storageOk) msg = "This browser isn't letting the chart save, so changes will be lost when the page closes. A private or incognito window usually causes this. Open the link in a normal browser window instead.";
+  else if (state.offset < 0 && list.length) msg = "You're looking back at the week of " + shortDate(viewMonday) + ". Tap anything that got done but wasn't checked off. This week's chart isn't affected.";
+  else if (state.offset > 0 && list.length) msg = "You're looking ahead to the week of " + shortDate(viewMonday) + ". Add something with “Only the week of " + shortDate(viewMonday) + "” ticked to plan for just that week.";
   else if (!list.length) msg = "Nothing on the chart yet. Tap + Add in any box to put a task there. Tick “Add to all 5 days” for things that happen every school day, like brushing teeth.";
   note.textContent = msg;
   note.hidden = !msg;
@@ -299,11 +339,11 @@ function render() {
     $("tabs").hidden = false;
     $("tabs").innerHTML = DAYS.map((d) => {
       const c = dayCount(list, d.k);
-      return '<button class="tab' + (d.k === TODAY ? " is-today" : "") + '" type="button" role="tab" data-act="day" data-day="' + d.k +
+      return '<button class="tab' + (isToday(d.k) ? " is-today" : "") + '" type="button" role="tab" data-act="day" data-day="' + d.k +
         '" aria-selected="' + (d.k === state.day) + '"><span class="d">' + d.s + '</span><span class="n">' + (c.total ? c.done + "/" + c.total : "&nbsp;") + "</span></button>";
     }).join("");
     $("dayname").hidden = false;
-    $("dayname").textContent = DAYS.find((d) => d.k === state.day).l + (state.day === TODAY ? " · Today" : "");
+    $("dayname").textContent = DAYS.find((d) => d.k === state.day).l + (isToday(state.day) ? " · Today" : "");
     board.innerHTML = SLOTS.map((s, i) => labHTML(s, i) + cellHTML(list, state.day, s.k, i === 0 ? " first" : "")).join("");
   } else {
     $("tabs").hidden = true;
@@ -312,7 +352,7 @@ function render() {
     DAYS.forEach((d, i) => {
       const c = dayCount(list, d.k);
       const t = countText(c);
-      h += '<div class="dh' + (i === 0 ? " first" : "") + (d.k === TODAY ? " today" : "") + '"><span class="d">' + d.l + "</span>" +
+      h += '<div class="dh' + (i === 0 ? " first" : "") + (isToday(d.k) ? " today" : "") + '"><span class="d">' + d.l + "</span>" +
         '<span class="n' + (c.total && c.done === c.total ? " all" : "") + '">' + (t || "&nbsp;") + "</span></div>";
     });
     SLOTS.forEach((s, i) => {
@@ -339,10 +379,16 @@ function load() {
     if (raw) tasks = JSON.parse(raw);
   } catch (e) { state.storageOk = false; }
   if (!Array.isArray(tasks)) tasks = [];
-  // Drop one-off tasks from past weeks and check marks from earlier weeks.
+  // Keep each week's check marks, but drop anything older than the arrows can reach.
+  const cutoff = new Date(monday); cutoff.setDate(monday.getDate() - 7 * WEEKS_BACK);
+  const CUT = keyOf(cutoff);
   state.tasks = tasks
-    .filter((t) => t && t.text && (!t.week || t.week >= WK))
-    .map((t) => Object.assign({}, t, { done: t.done && t.done[WK] ? { [WK]: true } : {} }));
+    .filter((t) => t && t.text && (!t.week || t.week >= CUT))
+    .map((t) => {
+      const done = {};
+      for (const k in (t.done || {})) if (t.done[k] && k >= CUT) done[k] = true;
+      return Object.assign({}, t, { done });
+    });
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state.tasks)); state.storageOk = true; }
@@ -357,7 +403,7 @@ function addTask(form) {
   const days = state.optAll ? DAYS.map((d) => d.k) : [day];
   const once = form.querySelector("#opt-once").checked;
   const base = Date.now();
-  days.forEach((d, i) => state.tasks.push({ id: newId(), text, day: d, slot, order: base + i, week: once ? WK : null, done: {} }));
+  days.forEach((d, i) => state.tasks.push({ id: newId(), text, day: d, slot, order: base + i, week: once ? VW : null, done: {} }));
   state.adding = null; state.draft = ""; state.optAll = false; state.optOnce = false;
   save(); render();
 }
@@ -365,7 +411,9 @@ function addTask(form) {
 function toggle(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
-  t.done = { [WK]: !isDone(t) };
+  const done = Object.assign({}, t.done);
+  if (isDone(t)) delete done[VW]; else done[VW] = true;
+  t.done = done;
   save(); render();
 }
 
@@ -383,6 +431,10 @@ document.addEventListener("click", (ev) => {
     state.adding = null; state.draft = ""; render();
   } else if (act === "day") {
     state.day = el.dataset.day; state.adding = null; render();
+  } else if (act === "prev" || act === "next") {
+    setView(state.offset + (act === "next" ? 1 : -1)); render();
+  } else if (act === "thisweek") {
+    setView(0); state.day = TODAY || state.day; render();
   }
 });
 document.addEventListener("submit", (ev) => {
@@ -416,7 +468,7 @@ function checkDate() {
   const wk = WK, today = TODAY;
   computeWeek();
   if (WK === wk && TODAY === today) return;
-  if (WK !== wk) { load(); setWeekLabel(); }
+  if (WK !== wk) { load(); setView(0); }
   state.day = TODAY || "mon";
   state.adding = null;
   render();
